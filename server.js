@@ -149,12 +149,24 @@ async function handleRegister(req, res) {
   const body = await readJson(req);
   const username = cleanUsername(body.username);
   const password = String(body.password || '');
+  const keyCode = String(body.key || '').trim().toUpperCase();
+  const isAdminUsername = username.toLowerCase() === 'admin';
 
   if (username.length < 3) return json(res, 400, { error: 'Username must be at least 3 characters.' });
   if (password.length < 4) return json(res, 400, { error: 'Password must be at least 4 characters.' });
+  if (!isAdminUsername && !keyCode) return json(res, 400, { error: 'Access key is required.' });
 
   const existing = await findUserByUsername(username);
   if (existing) return json(res, 409, { error: 'Username already taken.' });
+
+  let accessKey = null;
+  if (!isAdminUsername) {
+    const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&key_code=eq.${encodeURIComponent(keyCode)}&limit=1`);
+    accessKey = keys[0];
+    if (!accessKey) return json(res, 404, { error: 'Access key not found.' });
+    if (accessKey.revoked) return json(res, 403, { error: 'Access key is revoked.' });
+    if (accessKey.assigned_user_id) return json(res, 409, { error: 'Access key already used.' });
+  }
 
   const password_hash = await hashPassword(password);
   const rows = await supabaseFetch(`/app_users?select=${SAFE_USER_SELECT}`, {
@@ -164,7 +176,24 @@ async function handleRegister(req, res) {
   });
 
   const user = rows[0];
-  await logEvent(user.id, 'register', { username });
+
+  if (accessKey) {
+    const assigned = await supabaseFetch(`/access_keys?id=eq.${encodeURIComponent(accessKey.id)}&assigned_user_id=is.null&select=${KEY_SELECT}`, {
+      method: 'PATCH',
+      headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({
+        assigned_user_id: user.id,
+        redeemed_at: new Date().toISOString()
+      })
+    });
+
+    if (!assigned[0]) {
+      await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(user.id)}`, { method: 'DELETE' });
+      return json(res, 409, { error: 'Access key was just used. Try another key.' });
+    }
+  }
+
+  await logEvent(user.id, 'register', { username, used_key: Boolean(accessKey) });
   json(res, 201, { user });
 }
 
