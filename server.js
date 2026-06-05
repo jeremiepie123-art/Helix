@@ -202,6 +202,13 @@ async function handleAdminEvents(req, res) {
   json(res, 200, { events });
 }
 
+async function handleUserStatus(req, res, id) {
+  const rows = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(id)}&select=${SAFE_USER_SELECT}&limit=1`);
+  const user = rows[0];
+  if (!user) return json(res, 404, { error: 'User not found.' });
+  json(res, 200, { user });
+}
+
 async function handleAdminBan(req, res, id) {
   if (!requireAdmin(req, res)) return;
   const body = await readJson(req);
@@ -257,6 +264,9 @@ async function route(req, res) {
     if (req.method === 'POST' && pathname === '/api/login') return await handleLogin(req, res);
     if (req.method === 'GET' && pathname === '/api/admin/users') return await handleAdminUsers(req, res);
     if (req.method === 'GET' && pathname === '/api/admin/events') return await handleAdminEvents(req, res);
+
+    const statusMatch = pathname.match(/^\/api\/users\/([^/]+)\/status$/);
+    if (req.method === 'GET' && statusMatch) return await handleUserStatus(req, res, statusMatch[1]);
 
     const banMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
     if (req.method === 'PATCH' && banMatch) return await handleAdminBan(req, res, banMatch[1]);
