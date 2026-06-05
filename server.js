@@ -25,7 +25,7 @@ if (!SUPABASE_URL || !SUPABASE_SECRET_KEY || !ADMIN_SECRET) {
 const REST_URL = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1`;
 const SAFE_USER_SELECT = 'id,username,banned,created_at,last_login';
 const LOGIN_USER_SELECT = 'id,username,password_hash,banned,created_at,last_login';
-const KEY_SELECT = 'id,key_code,created_at,created_by,assigned_user_id,redeemed_at,revoked';
+const KEY_SELECT = 'id,key_code,created_at,created_by,expires_at,assigned_user_id,redeemed_at,revoked';
 
 function loadEnv(file) {
   if (!fs.existsSync(file)) return;
@@ -165,6 +165,7 @@ async function handleRegister(req, res) {
     accessKey = keys[0];
     if (!accessKey) return json(res, 404, { error: 'Access key not found.' });
     if (accessKey.revoked) return json(res, 403, { error: 'Access key is revoked.' });
+    if (isExpiredKey(accessKey)) return json(res, 403, { error: 'Access key expired.' });
     if (accessKey.assigned_user_id) return json(res, 409, { error: 'Access key already used.' });
   }
 
@@ -223,7 +224,21 @@ async function handleLogin(req, res) {
 async function handleAdminUsers(req, res) {
   if (!requireAdmin(req, res)) return;
   const users = await supabaseFetch(`/app_users?select=${SAFE_USER_SELECT}&order=created_at.desc`);
-  json(res, 200, { users });
+  const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&order=created_at.desc&limit=1000`);
+  const keyByUserId = new Map();
+
+  for (const key of keys) {
+    if (key.assigned_user_id && !keyByUserId.has(key.assigned_user_id)) {
+      keyByUserId.set(key.assigned_user_id, key);
+    }
+  }
+
+  json(res, 200, {
+    users: users.map(user => ({
+      ...user,
+      access_key: keyByUserId.get(user.id) || null
+    }))
+  });
 }
 
 async function handleAdminEvents(req, res) {
@@ -237,6 +252,22 @@ function makeAccessKey() {
   return `CRYPT-${part()}-${part()}-${part()}`;
 }
 
+function isExpiredKey(key) {
+  return Boolean(key?.expires_at && new Date(key.expires_at).getTime() <= Date.now());
+}
+
+function makeExpiryDate(expiresIn) {
+  const daysByValue = {
+    '1d': 1,
+    '7d': 7,
+    '30d': 30,
+    '90d': 90
+  };
+  const days = daysByValue[String(expiresIn || 'never')];
+  if (!days) return null;
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 async function handleAdminKeys(req, res) {
   if (!requireAdmin(req, res)) return;
   const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&order=created_at.desc&limit=100`);
@@ -248,12 +279,14 @@ async function handleAdminCreateKey(req, res) {
   const body = await readJson(req);
   const count = Math.max(1, Math.min(Number(body.count || 1), 25));
   const created_by = String(body.createdBy || 'Admin').slice(0, 80);
+  const expires_at = makeExpiryDate(body.expiresIn);
   const rows = [];
 
   for (let i = 0; i < count; i++) {
     rows.push({
       key_code: makeAccessKey(),
-      created_by
+      created_by,
+      expires_at
     });
   }
 
@@ -262,7 +295,7 @@ async function handleAdminCreateKey(req, res) {
     headers: { Prefer: 'return=representation' },
     body: JSON.stringify(rows)
   });
-  await logEvent(null, 'generate_keys', { count });
+  await logEvent(null, 'generate_keys', { count, expires_at });
   json(res, 201, { keys });
 }
 
@@ -289,6 +322,7 @@ async function handleRedeemKey(req, res) {
   const key = keys[0];
   if (!key) return json(res, 404, { error: 'Key not found.' });
   if (key.revoked) return json(res, 403, { error: 'Key is revoked.' });
+  if (isExpiredKey(key)) return json(res, 403, { error: 'Key expired.' });
   if (key.assigned_user_id) return json(res, 409, { error: 'Key already used.' });
 
   const updated = await supabaseFetch(`/access_keys?id=eq.${encodeURIComponent(key.id)}&select=${KEY_SELECT}`, {
