@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: crypted-ui-api
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: "node server.js"
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: ADMIN_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: PORT
+        value: "10000"
