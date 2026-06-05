@@ -25,6 +25,7 @@ if (!SUPABASE_URL || !SUPABASE_SECRET_KEY || !ADMIN_SECRET) {
 const REST_URL = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1`;
 const SAFE_USER_SELECT = 'id,username,banned,created_at,last_login';
 const LOGIN_USER_SELECT = 'id,username,password_hash,banned,created_at,last_login';
+const KEY_SELECT = 'id,key_code,created_at,created_by,assigned_user_id,redeemed_at,revoked';
 
 function loadEnv(file) {
   if (!fs.existsSync(file)) return;
@@ -202,6 +203,77 @@ async function handleAdminEvents(req, res) {
   json(res, 200, { events });
 }
 
+function makeAccessKey() {
+  const part = () => crypto.randomBytes(3).toString('hex').toUpperCase();
+  return `CRYPT-${part()}-${part()}-${part()}`;
+}
+
+async function handleAdminKeys(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&order=created_at.desc&limit=100`);
+  json(res, 200, { keys });
+}
+
+async function handleAdminCreateKey(req, res) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJson(req);
+  const count = Math.max(1, Math.min(Number(body.count || 1), 25));
+  const created_by = String(body.createdBy || 'Admin').slice(0, 80);
+  const rows = [];
+
+  for (let i = 0; i < count; i++) {
+    rows.push({
+      key_code: makeAccessKey(),
+      created_by
+    });
+  }
+
+  const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}`, {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(rows)
+  });
+  await logEvent(null, 'generate_keys', { count });
+  json(res, 201, { keys });
+}
+
+async function handleUserKey(req, res, id) {
+  const rows = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&assigned_user_id=eq.${encodeURIComponent(id)}&revoked=eq.false&limit=1`);
+  json(res, 200, { key: rows[0] || null });
+}
+
+async function handleRedeemKey(req, res) {
+  const body = await readJson(req);
+  const userId = String(body.userId || '');
+  const keyCode = String(body.key || '').trim().toUpperCase();
+  if (!userId || !keyCode) return json(res, 400, { error: 'User and key are required.' });
+
+  const users = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(userId)}&select=${SAFE_USER_SELECT}&limit=1`);
+  const user = users[0];
+  if (!user) return json(res, 404, { error: 'User not found.' });
+  if (user.banned) return json(res, 403, { error: 'You are banned.' });
+
+  const existing = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&assigned_user_id=eq.${encodeURIComponent(userId)}&revoked=eq.false&limit=1`);
+  if (existing[0]) return json(res, 409, { error: 'You already redeemed a key.' });
+
+  const keys = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&key_code=eq.${encodeURIComponent(keyCode)}&limit=1`);
+  const key = keys[0];
+  if (!key) return json(res, 404, { error: 'Key not found.' });
+  if (key.revoked) return json(res, 403, { error: 'Key is revoked.' });
+  if (key.assigned_user_id) return json(res, 409, { error: 'Key already used.' });
+
+  const updated = await supabaseFetch(`/access_keys?id=eq.${encodeURIComponent(key.id)}&select=${KEY_SELECT}`, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify({
+      assigned_user_id: userId,
+      redeemed_at: new Date().toISOString()
+    })
+  });
+  await logEvent(userId, 'redeem_key', { key: keyCode });
+  json(res, 200, { key: updated[0] });
+}
+
 async function handleUserStatus(req, res, id) {
   const rows = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(id)}&select=${SAFE_USER_SELECT}&limit=1`);
   const user = rows[0];
@@ -264,9 +336,15 @@ async function route(req, res) {
     if (req.method === 'POST' && pathname === '/api/login') return await handleLogin(req, res);
     if (req.method === 'GET' && pathname === '/api/admin/users') return await handleAdminUsers(req, res);
     if (req.method === 'GET' && pathname === '/api/admin/events') return await handleAdminEvents(req, res);
+    if (req.method === 'GET' && pathname === '/api/admin/keys') return await handleAdminKeys(req, res);
+    if (req.method === 'POST' && pathname === '/api/admin/keys') return await handleAdminCreateKey(req, res);
+    if (req.method === 'POST' && pathname === '/api/keys/redeem') return await handleRedeemKey(req, res);
 
     const statusMatch = pathname.match(/^\/api\/users\/([^/]+)\/status$/);
     if (req.method === 'GET' && statusMatch) return await handleUserStatus(req, res, statusMatch[1]);
+
+    const userKeyMatch = pathname.match(/^\/api\/users\/([^/]+)\/key$/);
+    if (req.method === 'GET' && userKeyMatch) return await handleUserKey(req, res, userKeyMatch[1]);
 
     const banMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
     if (req.method === 'PATCH' && banMatch) return await handleAdminBan(req, res, banMatch[1]);
