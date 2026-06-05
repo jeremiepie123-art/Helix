@@ -210,6 +210,14 @@ async function handleLogin(req, res) {
   const ok = await verifyPassword(password, user.password_hash);
   if (!ok) return json(res, 401, { error: 'Wrong password.' });
 
+  if (user.username.toLowerCase() !== 'admin') {
+    const accessKey = await getUserAccessKey(user.id);
+    if (isExpiredKey(accessKey)) {
+      await logEvent(user.id, 'expired_key_login_blocked', { username: user.username });
+      return json(res, 403, { error: 'Your key expired.' });
+    }
+  }
+
   const now = new Date().toISOString();
   const rows = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(user.id)}&select=${SAFE_USER_SELECT}`, {
     method: 'PATCH',
@@ -266,6 +274,11 @@ function makeExpiryDate(expiresIn) {
   const days = daysByValue[String(expiresIn || 'never')];
   if (!days) return null;
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function getUserAccessKey(userId) {
+  const rows = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&assigned_user_id=eq.${encodeURIComponent(userId)}&limit=1`);
+  return rows[0] || null;
 }
 
 async function handleAdminKeys(req, res) {
@@ -341,7 +354,14 @@ async function handleUserStatus(req, res, id) {
   const rows = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(id)}&select=${SAFE_USER_SELECT}&limit=1`);
   const user = rows[0];
   if (!user) return json(res, 404, { error: 'User not found.' });
-  json(res, 200, { user });
+  const accessKey = user.username.toLowerCase() === 'admin' ? null : await getUserAccessKey(user.id);
+  json(res, 200, {
+    user: {
+      ...user,
+      access_key: accessKey,
+      key_expired: isExpiredKey(accessKey)
+    }
+  });
 }
 
 async function handleAdminBan(req, res, id) {
