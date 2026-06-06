@@ -285,6 +285,17 @@ function makeExpiryDate(expiresIn, customExpiry = {}) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function makeExtendedExpiryDate(currentExpiresAt, customExpiry = {}) {
+  const days = Math.max(0, Math.min(Number(customExpiry.days || 0), 365));
+  const hours = Math.max(0, Math.min(Number(customExpiry.hours || 0), 23));
+  const minutes = Math.max(0, Math.min(Number(customExpiry.minutes || 0), 59));
+  const totalMs = ((days * 24 * 60) + (hours * 60) + minutes) * 60 * 1000;
+  if (totalMs <= 0) return null;
+  const currentMs = currentExpiresAt ? new Date(currentExpiresAt).getTime() : 0;
+  const baseMs = Number.isFinite(currentMs) && currentMs > Date.now() ? currentMs : Date.now();
+  return new Date(baseMs + totalMs).toISOString();
+}
+
 async function getUserAccessKey(userId) {
   const rows = await supabaseFetch(`/access_keys?select=${KEY_SELECT}&assigned_user_id=eq.${encodeURIComponent(userId)}&limit=1`);
   return rows[0] || null;
@@ -405,6 +416,34 @@ async function handleAdminBan(req, res, id) {
   json(res, 200, { user });
 }
 
+async function handleAdminExtendKey(req, res, id) {
+  if (!requireAdmin(req, res)) return;
+  const body = await readJson(req);
+  const users = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(id)}&select=${SAFE_USER_SELECT}&limit=1`);
+  const user = users[0];
+  if (!user) return json(res, 404, { error: 'User not found.' });
+  if (user.username.toLowerCase() === 'admin') return json(res, 400, { error: 'Admin does not need a key.' });
+
+  const key = await getUserAccessKey(user.id);
+  if (!key) return json(res, 404, { error: 'User has no key to extend.' });
+
+  const expires_at = makeExtendedExpiryDate(key.expires_at, body.customExpiry);
+  if (!expires_at) return json(res, 400, { error: 'Extension must be at least 1 minute.' });
+
+  const rows = await supabaseFetch(`/access_keys?id=eq.${encodeURIComponent(key.id)}&select=${KEY_SELECT}`, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify({ expires_at })
+  });
+  await logEvent(user.id, 'extend_key', {
+    username: user.username,
+    key_code: key.key_code,
+    expires_at,
+    added: body.customExpiry || {}
+  });
+  json(res, 200, { key: rows[0], user });
+}
+
 async function handleAdminResetPassword(req, res, id) {
   if (!requireAdmin(req, res)) return;
   const body = await readJson(req);
@@ -460,6 +499,9 @@ async function route(req, res) {
 
     const banMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
     if (req.method === 'PATCH' && banMatch) return await handleAdminBan(req, res, banMatch[1]);
+
+    const extendMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/extend-key$/);
+    if (req.method === 'PATCH' && extendMatch) return await handleAdminExtendKey(req, res, extendMatch[1]);
 
     const resetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
     if (req.method === 'POST' && resetMatch) return await handleAdminResetPassword(req, res, resetMatch[1]);
