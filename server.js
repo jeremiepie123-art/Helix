@@ -264,7 +264,16 @@ function isExpiredKey(key) {
   return Boolean(key?.expires_at && new Date(key.expires_at).getTime() <= Date.now());
 }
 
-function makeExpiryDate(expiresIn) {
+function makeExpiryDate(expiresIn, customExpiry = {}) {
+  if (String(expiresIn || '') === 'custom') {
+    const days = Math.max(0, Math.min(Number(customExpiry.days || 0), 365));
+    const hours = Math.max(0, Math.min(Number(customExpiry.hours || 0), 23));
+    const minutes = Math.max(0, Math.min(Number(customExpiry.minutes || 0), 59));
+    const totalMs = ((days * 24 * 60) + (hours * 60) + minutes) * 60 * 1000;
+    if (totalMs <= 0) return null;
+    return new Date(Date.now() + totalMs).toISOString();
+  }
+
   const daysByValue = {
     '1d': 1,
     '7d': 7,
@@ -292,7 +301,10 @@ async function handleAdminCreateKey(req, res) {
   const body = await readJson(req);
   const count = Math.max(1, Math.min(Number(body.count || 1), 25));
   const created_by = String(body.createdBy || 'Admin').slice(0, 80);
-  const expires_at = makeExpiryDate(body.expiresIn);
+  const expires_at = makeExpiryDate(body.expiresIn, body.customExpiry);
+  if (String(body.expiresIn || '') === 'custom' && !expires_at) {
+    return json(res, 400, { error: 'Custom expiry must be at least 1 minute.' });
+  }
   const rows = [];
 
   for (let i = 0; i < count; i++) {
