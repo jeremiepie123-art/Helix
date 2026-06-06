@@ -317,6 +317,20 @@ async function handleUserKey(req, res, id) {
   json(res, 200, { key: rows[0] || null });
 }
 
+async function handleRenewalRequest(req, res, id) {
+  const rows = await supabaseFetch(`/app_users?id=eq.${encodeURIComponent(id)}&select=${SAFE_USER_SELECT}&limit=1`);
+  const user = rows[0];
+  if (!user) return json(res, 404, { error: 'User not found.' });
+  const accessKey = user.username.toLowerCase() === 'admin' ? null : await getUserAccessKey(user.id);
+  await logEvent(user.id, 'key_renewal_request', {
+    username: user.username,
+    key_code: accessKey?.key_code || null,
+    expires_at: accessKey?.expires_at || null,
+    expired: isExpiredKey(accessKey)
+  });
+  json(res, 201, { ok: true });
+}
+
 async function handleRedeemKey(req, res) {
   const body = await readJson(req);
   const userId = String(body.userId || '');
@@ -428,6 +442,9 @@ async function route(req, res) {
 
     const userKeyMatch = pathname.match(/^\/api\/users\/([^/]+)\/key$/);
     if (req.method === 'GET' && userKeyMatch) return await handleUserKey(req, res, userKeyMatch[1]);
+
+    const renewalMatch = pathname.match(/^\/api\/users\/([^/]+)\/renewal-request$/);
+    if (req.method === 'POST' && renewalMatch) return await handleRenewalRequest(req, res, renewalMatch[1]);
 
     const banMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
     if (req.method === 'PATCH' && banMatch) return await handleAdminBan(req, res, banMatch[1]);
